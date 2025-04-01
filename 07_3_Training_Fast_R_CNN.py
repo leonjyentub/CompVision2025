@@ -19,7 +19,7 @@ print(device, torch.cuda.is_available())
 #kaggle
 #root = '/kaggle/input/open-images-bus-trucks'
 #local
-root = 'data/open-images-bus-trucks'
+root = 'C:/Users/leonj/Documents/Data/open-images-bus-trucks'
 IMAGE_ROOT = os.path.join(root, 'images/images')
 DF_RAW = pd.read_csv(os.path.join(root, 'df.csv'))
 DF_RAW.head()
@@ -96,7 +96,7 @@ def extract_iou(boxA, boxB, epsilon=1e-5):
 
 # %%
 FPATHS, GTBBS, CLSS, DELTAS, ROIS, IOUS = [], [], [], [], [], []
-N = 1000 #測試而已，看要多一點還是100張先試跑看看
+N = 100 #測試而已，看要多一點還是100張先試跑看看
 for ix, (im, bbs, labels, fpath) in enumerate(ds):
     if(ix==N):
         break
@@ -206,7 +206,7 @@ from torchvision.ops import RoIPool
 class FRCNN(nn.Module):
     def __init__(self):
         super().__init__()
-        rawnet = torchvision.models.vgg16_bn(pretrained=True)
+        rawnet = models.vgg16_bn(pretrained=True)
         for param in rawnet.features.parameters():
             param.requires_grad = True
         self.seq = nn.Sequential(*list(rawnet.features.children())[:-1])
@@ -277,7 +277,7 @@ n_epochs = 5 #感覺3輪之後就沒什麼變化了
 for epoch in range(n_epochs):
     _n = len(train_loader)
     for ix, inputs in enumerate(train_loader):
-        loss, train_loc_loss, train_regr_loss, train_accs = train_batch(inputs, rcnn, optimizer, criterion)
+        loss, train_loc_loss, train_regr_loss, train_accs = train_batch(inputs, frcnn, optimizer, criterion)
     print(f'train-Epoch {epoch+1} of {n_epochs} done, loss {loss.item():.4f}')
         
     _n = len(test_loader)
@@ -287,7 +287,7 @@ for epoch in range(n_epochs):
 
 # %%
 # 儲存rcnn模型
-torch.save(frcnn.state_dict(), '07_3_Training_frcnn.pth')
+torch.save(frcnn.state_dict(), 'pth\07_3_Training_frcnn.pth')
 
 # %%
 def test_predictions(img):

@@ -11,6 +11,7 @@ from torch.utils.data import Dataset, DataLoader
 from matplotlib import pyplot as plt
 import selectivesearch
 import warnings
+import configparser
 warnings.filterwarnings('ignore')
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 print(device, torch.cuda.is_available())
@@ -19,7 +20,9 @@ print(device, torch.cuda.is_available())
 #kaggle
 #root = '/kaggle/input/open-images-bus-trucks'
 #local
-root = 'C:/Users/leonj/Documents/Data/open-images-bus-trucks'
+config = configparser.ConfigParser()
+config.read('config.ini')
+root = config.get('DEFAULT', 'root_dir')
 IMAGE_ROOT = os.path.join(root, 'images/images')
 DF_RAW = pd.read_csv(os.path.join(root, 'df.csv'))
 DF_RAW.head()

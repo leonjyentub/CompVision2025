@@ -1,7 +1,8 @@
 from torchvision import transforms
-from utils import *
-from PIL import Image, ImageDraw, ImageFont
+#from utils import *
+from PIL import Image
 import numpy as np
+import torch
 # Load model checkpoint
 # checkpoint = 'checkpoint_ssd300.pth.tar'
 # checkpoint = torch.load(checkpoint)

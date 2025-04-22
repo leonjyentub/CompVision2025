@@ -1,3 +1,9 @@
 {
-    "editor.fontFamily": "'Maple Mono','Fira Code', Consolas, 'Courier New', monospace"
+    "editor.fontFamily": "'Maple Mono','Fira Code', Consolas, 'Courier New', monospace",
+    "github.copilot.enable": {
+        "*": true,
+        "plaintext": false,
+        "markdown": false,
+        "scminput": false
+    }
 }

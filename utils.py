@@ -1,264 +1,282 @@
-import json
+import datetime
+import errno
 import os
+import time
+from collections import defaultdict, deque
+
 import torch
-import random
-import xml.etree.ElementTree as ET
-import torchvision.transforms.functional as FT
-# from load_data import voc_labels, label_map, rev_label_map, device
+import torch.distributed as dist
 
-def decimate(tensor, m):
-    """
-    Decimate a tensor by a factor 'm', i.e. downsample by keeping every 'm'th value.
 
-    This is used when we convert FC layers to equivalent Convolutional layers, BUT of a smaller size.
-
-    :param tensor: tensor to be decimated
-    :param m: list of decimation factors for each dimension of the tensor; None if not to be decimated along a dimension
-    :return: decimated tensor
-    """
-    assert tensor.dim() == len(m)
-    for d in range(tensor.dim()):
-        if m[d] is not None:
-            tensor = tensor.index_select(dim=d,
-                                         index=torch.arange(start=0, end=tensor.size(d), step=m[d]).long())
-
-    return tensor
-
-def calculate_mAP(det_boxes, det_labels, det_scores, true_boxes, true_labels, true_difficulties):
-    """
-    Calculate the Mean Average Precision (mAP) of detected objects.
-
-    See https://medium.com/@jonathan_hui/map-mean-average-precision-for-object-detection-45c121a31173 for an explanation
-
-    :param det_boxes: list of tensors, one tensor for each image containing detected objects' bounding boxes
-    :param det_labels: list of tensors, one tensor for each image containing detected objects' labels
-    :param det_scores: list of tensors, one tensor for each image containing detected objects' labels' scores
-    :param true_boxes: list of tensors, one tensor for each image containing actual objects' bounding boxes
-    :param true_labels: list of tensors, one tensor for each image containing actual objects' labels
-    :param true_difficulties: list of tensors, one tensor for each image containing actual objects' difficulty (0 or 1)
-    :return: list of average precisions for all classes, mean average precision (mAP)
-    """
-    assert len(det_boxes) == len(det_labels) == len(det_scores) == len(true_boxes) == len(
-        true_labels) == len(
-        true_difficulties)  # these are all lists of tensors of the same length, i.e. number of images
-    n_classes = len(label_map)
-
-    # Store all (true) objects in a single continuous tensor while keeping track of the image it is from
-    true_images = list()
-    for i in range(len(true_labels)):
-        true_images.extend([i] * true_labels[i].size(0))
-    true_images = torch.LongTensor(true_images).to(
-        device)  # (n_objects), n_objects is the total no. of objects across all images
-    true_boxes = torch.cat(true_boxes, dim=0)  # (n_objects, 4)
-    true_labels = torch.cat(true_labels, dim=0)  # (n_objects)
-    true_difficulties = torch.cat(true_difficulties, dim=0)  # (n_objects)
-
-    assert true_images.size(0) == true_boxes.size(0) == true_labels.size(0)
-
-    # Store all detections in a single continuous tensor while keeping track of the image it is from
-    det_images = list()
-    for i in range(len(det_labels)):
-        det_images.extend([i] * det_labels[i].size(0))
-    det_images = torch.LongTensor(det_images).to(device)  # (n_detections)
-    det_boxes = torch.cat(det_boxes, dim=0)  # (n_detections, 4)
-    det_labels = torch.cat(det_labels, dim=0)  # (n_detections)
-    det_scores = torch.cat(det_scores, dim=0)  # (n_detections)
-
-    assert det_images.size(0) == det_boxes.size(0) == det_labels.size(0) == det_scores.size(0)
-
-    # Calculate APs for each class (except background)
-    average_precisions = torch.zeros((n_classes - 1), dtype=torch.float)  # (n_classes - 1)
-    for c in range(1, n_classes):
-        # Extract only objects with this class
-        true_class_images = true_images[true_labels == c]  # (n_class_objects)
-        true_class_boxes = true_boxes[true_labels == c]  # (n_class_objects, 4)
-        true_class_difficulties = true_difficulties[true_labels == c]  # (n_class_objects)
-        n_easy_class_objects = (1 - true_class_difficulties).sum().item()  # ignore difficult objects
-
-        # Keep track of which true objects with this class have already been 'detected'
-        # So far, none
-        true_class_boxes_detected = torch.zeros((true_class_difficulties.size(0)), dtype=torch.uint8).to(
-            device)  # (n_class_objects)
-
-        # Extract only detections with this class
-        det_class_images = det_images[det_labels == c]  # (n_class_detections)
-        det_class_boxes = det_boxes[det_labels == c]  # (n_class_detections, 4)
-        det_class_scores = det_scores[det_labels == c]  # (n_class_detections)
-        n_class_detections = det_class_boxes.size(0)
-        if n_class_detections == 0:
-            continue
-
-        # Sort detections in decreasing order of confidence/scores
-        det_class_scores, sort_ind = torch.sort(det_class_scores, dim=0, descending=True)  # (n_class_detections)
-        det_class_images = det_class_images[sort_ind]  # (n_class_detections)
-        det_class_boxes = det_class_boxes[sort_ind]  # (n_class_detections, 4)
-
-        # In the order of decreasing scores, check if true or false positive
-        true_positives = torch.zeros((n_class_detections), dtype=torch.float).to(device)  # (n_class_detections)
-        false_positives = torch.zeros((n_class_detections), dtype=torch.float).to(device)  # (n_class_detections)
-        for d in range(n_class_detections):
-            this_detection_box = det_class_boxes[d].unsqueeze(0)  # (1, 4)
-            this_image = det_class_images[d]  # (), scalar
-
-            # Find objects in the same image with this class, their difficulties, and whether they have been detected before
-            object_boxes = true_class_boxes[true_class_images == this_image]  # (n_class_objects_in_img)
-            object_difficulties = true_class_difficulties[true_class_images == this_image]  # (n_class_objects_in_img)
-            # If no such object in this image, then the detection is a false positive
-            if object_boxes.size(0) == 0:
-                false_positives[d] = 1
-                continue
-
-            # Find maximum overlap of this detection with objects in this image of this class
-            overlaps = find_jaccard_overlap(this_detection_box, object_boxes)  # (1, n_class_objects_in_img)
-            max_overlap, ind = torch.max(overlaps.squeeze(0), dim=0)  # (), () - scalars
-
-            # 'ind' is the index of the object in these image-level tensors 'object_boxes', 'object_difficulties'
-            # In the original class-level tensors 'true_class_boxes', etc., 'ind' corresponds to object with index...
-            original_ind = torch.LongTensor(range(true_class_boxes.size(0)))[true_class_images == this_image][ind]
-            # We need 'original_ind' to update 'true_class_boxes_detected'
-
-            # If the maximum overlap is greater than the threshold of 0.5, it's a match
-            if max_overlap.item() > 0.5:
-                # If the object it matched with is 'difficult', ignore it
-                if object_difficulties[ind] == 0:
-                    # If this object has already not been detected, it's a true positive
-                    if true_class_boxes_detected[original_ind] == 0:
-                        true_positives[d] = 1
-                        true_class_boxes_detected[original_ind] = 1  # this object has now been detected/accounted for
-                    # Otherwise, it's a false positive (since this object is already accounted for)
-                    else:
-                        false_positives[d] = 1
-            # Otherwise, the detection occurs in a different location than the actual object, and is a false positive
-            else:
-                false_positives[d] = 1
-
-        # Compute cumulative precision and recall at each detection in the order of decreasing scores
-        cumul_true_positives = torch.cumsum(true_positives, dim=0)  # (n_class_detections)
-        cumul_false_positives = torch.cumsum(false_positives, dim=0)  # (n_class_detections)
-        cumul_precision = cumul_true_positives / (
-                cumul_true_positives + cumul_false_positives + 1e-10)  # (n_class_detections)
-        cumul_recall = cumul_true_positives / n_easy_class_objects  # (n_class_detections)
-
-        # Find the mean of the maximum of the precisions corresponding to recalls above the threshold 't'
-        recall_thresholds = torch.arange(start=0, end=1.1, step=.1).tolist()  # (11)
-        precisions = torch.zeros((len(recall_thresholds)), dtype=torch.float).to(device)  # (11)
-        for i, t in enumerate(recall_thresholds):
-            recalls_above_t = cumul_recall >= t
-            if recalls_above_t.any():
-                precisions[i] = cumul_precision[recalls_above_t].max()
-            else:
-                precisions[i] = 0.
-        average_precisions[c - 1] = precisions.mean()  # c is in [1, n_classes - 1]
-
-    # Calculate Mean Average Precision (mAP)
-    mean_average_precision = average_precisions.mean().item()
-
-    # Keep class-wise average precisions in a dictionary
-    average_precisions = {rev_label_map[c + 1]: v for c, v in enumerate(average_precisions.tolist())}
-
-    return average_precisions, mean_average_precision
-
-def xy_to_cxcy(xy):
-    """
-    Convert bounding boxes from boundary coordinates (x_min, y_min, x_max, y_max) to center-size coordinates (c_x, c_y, w, h).
-
-    :param xy: bounding boxes in boundary coordinates, a tensor of size (n_boxes, 4)
-    :return: bounding boxes in center-size coordinates, a tensor of size (n_boxes, 4)
-    """
-    return torch.cat([(xy[:, 2:] + xy[:, :2]) / 2,  # c_x, c_y
-                      xy[:, 2:] - xy[:, :2]], 1)  # w, h
-
-def cxcy_to_xy(cxcy):
-    """
-    Convert bounding boxes from center-size coordinates (c_x, c_y, w, h) to boundary coordinates (x_min, y_min, x_max, y_max).
-
-    :param cxcy: bounding boxes in center-size coordinates, a tensor of size (n_boxes, 4)
-    :return: bounding boxes in boundary coordinates, a tensor of size (n_boxes, 4)
-    """
-    return torch.cat([cxcy[:, :2] - (cxcy[:, 2:] / 2),  # x_min, y_min
-                      cxcy[:, :2] + (cxcy[:, 2:] / 2)], 1)  # x_max, y_max
-
-def cxcy_to_gcxgcy(cxcy, priors_cxcy):
-    """
-    Encode bounding boxes (that are in center-size form) w.r.t. the corresponding prior boxes (that are in center-size form).
-
-    For the center coordinates, find the offset with respect to the prior box, and scale by the size of the prior box.
-    For the size coordinates, scale by the size of the prior box, and convert to the log-space.
-
-    In the model, we are predicting bounding box coordinates in this encoded form.
-
-    :param cxcy: bounding boxes in center-size coordinates, a tensor of size (n_priors, 4)
-    :param priors_cxcy: prior boxes with respect to which the encoding must be performed, a tensor of size (n_priors, 4)
-    :return: encoded bounding boxes, a tensor of size (n_priors, 4)
+class SmoothedValue:
+    """Track a series of values and provide access to smoothed values over a
+    window or the global series average.
     """
 
-    # The 10 and 5 below are referred to as 'variances' in the original Caffe repo, completely empirical
-    # They are for some sort of numerical conditioning, for 'scaling the localization gradient'
-    # See https://github.com/weiliu89/caffe/issues/155
-    return torch.cat([(cxcy[:, :2] - priors_cxcy[:, :2]) / (priors_cxcy[:, 2:] / 10),  # g_c_x, g_c_y
-                      torch.log(cxcy[:, 2:] / priors_cxcy[:, 2:]) * 5], 1)  # g_w, g_h
+    def __init__(self, window_size=20, fmt=None):
+        if fmt is None:
+            fmt = "{median:.4f} ({global_avg:.4f})"
+        self.deque = deque(maxlen=window_size)
+        self.total = 0.0
+        self.count = 0
+        self.fmt = fmt
 
-def gcxgcy_to_cxcy(gcxgcy, priors_cxcy):
+    def update(self, value, n=1):
+        self.deque.append(value)
+        self.count += n
+        self.total += value * n
+
+    def synchronize_between_processes(self):
+        """
+        Warning: does not synchronize the deque!
+        """
+        if not is_dist_avail_and_initialized():
+            return
+        t = torch.tensor([self.count, self.total], dtype=torch.float64, device="cuda")
+        dist.barrier()
+        dist.all_reduce(t)
+        t = t.tolist()
+        self.count = int(t[0])
+        self.total = t[1]
+
+    @property
+    def median(self):
+        d = torch.tensor(list(self.deque))
+        return d.median().item()
+
+    @property
+    def avg(self):
+        d = torch.tensor(list(self.deque), dtype=torch.float32)
+        return d.mean().item()
+
+    @property
+    def global_avg(self):
+        return self.total / self.count
+
+    @property
+    def max(self):
+        return max(self.deque)
+
+    @property
+    def value(self):
+        return self.deque[-1]
+
+    def __str__(self):
+        return self.fmt.format(
+            median=self.median, avg=self.avg, global_avg=self.global_avg, max=self.max, value=self.value
+        )
+
+
+def all_gather(data):
     """
-    Decode bounding box coordinates predicted by the model, since they are encoded in the form mentioned above.
-
-    They are decoded into center-size coordinates.
-
-    This is the inverse of the function above.
-
-    :param gcxgcy: encoded bounding boxes, i.e. output of the model, a tensor of size (n_priors, 4)
-    :param priors_cxcy: prior boxes with respect to which the encoding is defined, a tensor of size (n_priors, 4)
-    :return: decoded bounding boxes in center-size form, a tensor of size (n_priors, 4)
+    Run all_gather on arbitrary picklable data (not necessarily tensors)
+    Args:
+        data: any picklable object
+    Returns:
+        list[data]: list of data gathered from each rank
     """
+    world_size = get_world_size()
+    if world_size == 1:
+        return [data]
+    data_list = [None] * world_size
+    dist.all_gather_object(data_list, data)
+    return data_list
 
-    return torch.cat([gcxgcy[:, :2] * priors_cxcy[:, 2:] / 10 + priors_cxcy[:, :2],  # c_x, c_y
-                      torch.exp(gcxgcy[:, 2:] / 5) * priors_cxcy[:, 2:]], 1)  # w, h
 
-def find_intersection(set_1, set_2):
+def reduce_dict(input_dict, average=True):
     """
-    Find the intersection of every box combination between two sets of boxes that are in boundary coordinates.
-
-    :param set_1: set 1, a tensor of dimensions (n1, 4)
-    :param set_2: set 2, a tensor of dimensions (n2, 4)
-    :return: intersection of each of the boxes in set 1 with respect to each of the boxes in set 2, a tensor of dimensions (n1, n2)
+    Args:
+        input_dict (dict): all the values will be reduced
+        average (bool): whether to do average or sum
+    Reduce the values in the dictionary from all processes so that all processes
+    have the averaged results. Returns a dict with the same fields as
+    input_dict, after reduction.
     """
+    world_size = get_world_size()
+    if world_size < 2:
+        return input_dict
+    with torch.inference_mode():
+        names = []
+        values = []
+        # sort the keys so that they are consistent across processes
+        for k in sorted(input_dict.keys()):
+            names.append(k)
+            values.append(input_dict[k])
+        values = torch.stack(values, dim=0)
+        dist.all_reduce(values)
+        if average:
+            values /= world_size
+        reduced_dict = {k: v for k, v in zip(names, values)}
+    return reduced_dict
 
-    # PyTorch auto-broadcasts singleton dimensions
-    lower_bounds = torch.max(set_1[:, :2].unsqueeze(1), set_2[:, :2].unsqueeze(0))  # (n1, n2, 2)
-    upper_bounds = torch.min(set_1[:, 2:].unsqueeze(1), set_2[:, 2:].unsqueeze(0))  # (n1, n2, 2)
-    intersection_dims = torch.clamp(upper_bounds - lower_bounds, min=0)  # (n1, n2, 2)
-    return intersection_dims[:, :, 0] * intersection_dims[:, :, 1]  # (n1, n2)
 
-def find_jaccard_overlap(set_1, set_2):
+class MetricLogger:
+    def __init__(self, delimiter="\t"):
+        self.meters = defaultdict(SmoothedValue)
+        self.delimiter = delimiter
+
+    def update(self, **kwargs):
+        for k, v in kwargs.items():
+            if isinstance(v, torch.Tensor):
+                v = v.item()
+            assert isinstance(v, (float, int))
+            self.meters[k].update(v)
+
+    def __getattr__(self, attr):
+        if attr in self.meters:
+            return self.meters[attr]
+        if attr in self.__dict__:
+            return self.__dict__[attr]
+        raise AttributeError(f"'{type(self).__name__}' object has no attribute '{attr}'")
+
+    def __str__(self):
+        loss_str = []
+        for name, meter in self.meters.items():
+            loss_str.append(f"{name}: {str(meter)}")
+        return self.delimiter.join(loss_str)
+
+    def synchronize_between_processes(self):
+        for meter in self.meters.values():
+            meter.synchronize_between_processes()
+
+    def add_meter(self, name, meter):
+        self.meters[name] = meter
+
+    def log_every(self, iterable, print_freq, header=None):
+        i = 0
+        if not header:
+            header = ""
+        start_time = time.time()
+        end = time.time()
+        iter_time = SmoothedValue(fmt="{avg:.4f}")
+        data_time = SmoothedValue(fmt="{avg:.4f}")
+        space_fmt = ":" + str(len(str(len(iterable)))) + "d"
+        if torch.cuda.is_available():
+            log_msg = self.delimiter.join(
+                [
+                    header,
+                    "[{0" + space_fmt + "}/{1}]",
+                    "eta: {eta}",
+                    "{meters}",
+                    "time: {time}",
+                    "data: {data}",
+                    "max mem: {memory:.0f}",
+                ]
+            )
+        else:
+            log_msg = self.delimiter.join(
+                [header, "[{0" + space_fmt + "}/{1}]", "eta: {eta}", "{meters}", "time: {time}", "data: {data}"]
+            )
+        MB = 1024.0 * 1024.0
+        for obj in iterable:
+            data_time.update(time.time() - end)
+            yield obj
+            iter_time.update(time.time() - end)
+            if i % print_freq == 0 or i == len(iterable) - 1:
+                eta_seconds = iter_time.global_avg * (len(iterable) - i)
+                eta_string = str(datetime.timedelta(seconds=int(eta_seconds)))
+                if torch.cuda.is_available():
+                    print(
+                        log_msg.format(
+                            i,
+                            len(iterable),
+                            eta=eta_string,
+                            meters=str(self),
+                            time=str(iter_time),
+                            data=str(data_time),
+                            memory=torch.cuda.max_memory_allocated() / MB,
+                        )
+                    )
+                else:
+                    print(
+                        log_msg.format(
+                            i, len(iterable), eta=eta_string, meters=str(self), time=str(iter_time), data=str(data_time)
+                        )
+                    )
+            i += 1
+            end = time.time()
+        total_time = time.time() - start_time
+        total_time_str = str(datetime.timedelta(seconds=int(total_time)))
+        print(f"{header} Total time: {total_time_str} ({total_time / len(iterable):.4f} s / it)")
+
+
+def collate_fn(batch):
+    return tuple(zip(*batch))
+
+
+def mkdir(path):
+    try:
+        os.makedirs(path)
+    except OSError as e:
+        if e.errno != errno.EEXIST:
+            raise
+
+
+def setup_for_distributed(is_master):
     """
-    Find the Jaccard Overlap (IoU) of every box combination between two sets of boxes that are in boundary coordinates.
-
-    :param set_1: set 1, a tensor of dimensions (n1, 4)
-    :param set_2: set 2, a tensor of dimensions (n2, 4)
-    :return: Jaccard Overlap of each of the boxes in set 1 with respect to each of the boxes in set 2, a tensor of dimensions (n1, n2)
+    This function disables printing when not in master process
     """
+    import builtins as __builtin__
 
-    # Find intersections
-    intersection = find_intersection(set_1, set_2)  # (n1, n2)
+    builtin_print = __builtin__.print
 
-    # Find areas of each box in both sets
-    areas_set_1 = (set_1[:, 2] - set_1[:, 0]) * (set_1[:, 3] - set_1[:, 1])  # (n1)
-    areas_set_2 = (set_2[:, 2] - set_2[:, 0]) * (set_2[:, 3] - set_2[:, 1])  # (n2)
+    def print(*args, **kwargs):
+        force = kwargs.pop("force", False)
+        if is_master or force:
+            builtin_print(*args, **kwargs)
 
-    # Find the union
-    # PyTorch auto-broadcasts singleton dimensions
-    union = areas_set_1.unsqueeze(1) + areas_set_2.unsqueeze(0) - intersection  # (n1, n2)
+    __builtin__.print = print
 
-    return intersection / union  # (n1, n2)
 
-def clip_gradient(optimizer, grad_clip):
-    """
-    Clips gradients computed during backpropagation to avoid explosion of gradients.
+def is_dist_avail_and_initialized():
+    if not dist.is_available():
+        return False
+    if not dist.is_initialized():
+        return False
+    return True
 
-    :param optimizer: optimizer with the gradients to be clipped
-    :param grad_clip: clip value
-    """
-    for group in optimizer.param_groups:
-        for param in group['params']:
-            if param.grad is not None:
-                param.grad.data.clamp_(-grad_clip, grad_clip)
+
+def get_world_size():
+    if not is_dist_avail_and_initialized():
+        return 1
+    return dist.get_world_size()
+
+
+def get_rank():
+    if not is_dist_avail_and_initialized():
+        return 0
+    return dist.get_rank()
+
+
+def is_main_process():
+    return get_rank() == 0
+
+
+def save_on_master(*args, **kwargs):
+    if is_main_process():
+        torch.save(*args, **kwargs)
+
+
+def init_distributed_mode(args):
+    if "RANK" in os.environ and "WORLD_SIZE" in os.environ:
+        args.rank = int(os.environ["RANK"])
+        args.world_size = int(os.environ["WORLD_SIZE"])
+        args.gpu = int(os.environ["LOCAL_RANK"])
+    elif "SLURM_PROCID" in os.environ:
+        args.rank = int(os.environ["SLURM_PROCID"])
+        args.gpu = args.rank % torch.cuda.device_count()
+    else:
+        print("Not using distributed mode")
+        args.distributed = False
+        return
+
+    args.distributed = True
+
+    torch.cuda.set_device(args.gpu)
+    args.dist_backend = "nccl"
+    print(f"| distributed init (rank {args.rank}): {args.dist_url}", flush=True)
+    torch.distributed.init_process_group(
+        backend=args.dist_backend, init_method=args.dist_url, world_size=args.world_size, rank=args.rank
+    )
+    torch.distributed.barrier()
+    setup_for_distributed(args.rank == 0)

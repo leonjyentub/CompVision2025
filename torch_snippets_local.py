@@ -1,3 +1,5 @@
+import PIL
+import numpy as np
 import tqdm
 def Tqdm(x, total=None, desc=None):
     total = len(x) if total is None else total
@@ -26,7 +28,32 @@ def stem(fpath):
         return name[:i]
     else:
         return name
-    
+
+import random
+def choose(imgs):
+    return imgs[random.randint(0, len(imgs)-1)]
+
+
+import cv2
+def readImage2RGB(fpath):
+    '''read an image from a file to RGB format'''
+    img = cv2.imread(str(fpath))
+    # convert BGR to RGB
+    if img is None:
+        raise ValueError(f"Image not found: {fpath}")
+    if len(img.shape) == 3 and img.shape[2] == 3:
+        img = img[:, :, ::-1]
+    #img = img[..., ::-1]  # BGR to RGB
+    return img
+
+def readImage2CV2(fpath):
+    '''read an image from a file to RGB format'''
+    img = cv2.imread(str(fname), cv2.IMREAD_COLOR)
+    return img
+
+import matplotlib.patheffects as path_effects
+import matplotlib.pyplot as plt
+
 def simple_show(
     img=None,
     ax=None,
@@ -42,9 +69,6 @@ def simple_show(
 ):
     "show an image"
     from IPython.display import display
-    import matplotlib.pyplot as plt
-    import PIL
-    import numpy as np
     plt.rcParams["axes.edgecolor"] = "black"
     globals().update(locals())
 
@@ -135,4 +159,50 @@ def inspect_shape(*arrays, **kwargs):
         else:
             name = name + f"{typ}:\n"
             
+def subplots(ims, nc=5, figsize=(5, 5), silent=True, **kwargs):
+    plt.rcParams["axes.edgecolor"] = "black"
+    if len(ims) == 0:
+        return
+    titles = kwargs.pop("titles", [None] * len(ims))
+    if isinstance(titles, str):
+        if titles == "ixs":
+            titles = [str(i) for i in range(len(ims))]
+        else:
+            titles = titles.split(",")
+    if len(ims) <= 5 and nc == 5:
+        nc = len(ims)
+    nr = (len(ims) // nc) if len(ims) % nc == 0 else (1 + len(ims) // nc)
+    if not silent:
+        print(f"plotting {len(ims)} images in a grid of {nr}x{nc} @ {figsize}")
+    figsize = kwargs.pop("sz", figsize)
+    figsize = (figsize, figsize) if isinstance(figsize, int) else figsize
+    fig, axes = plt.subplots(nr, nc, figsize=figsize)
+    return_axes = kwargs.pop("return_axes", False)
+    axes = axes.flat
+    fig.suptitle(kwargs.pop("suptitle", ""))
 
+    if "text_col" in kwargs:
+        text_cols = [kwargs.pop("text_col")] * len(ims)
+    else:
+        text_cols = kwargs.pop("text_cols", [None] * len(ims))
+    titles = titles.split(",") if isinstance(titles, str) else titles
+    for ix, (im, ax) in enumerate(zip(ims, axes)):
+        simple_show(
+            im,
+            ax=ax,
+            title=titles[ix],
+            **kwargs,
+        )
+    blank = np.eye(100) + np.eye(100)[::-1]
+    for ax in axes:
+        simple_show(blank, ax=ax)
+    plt.tight_layout()
+    if return_axes:
+        return axes
+    plt.show()
+
+def line(string="", lw=66, upper=True, pad="\N{Box Drawings Double Horizontal}"):
+    i = string.center(lw, pad)
+    if upper:
+        i = i.upper()
+    print(i)

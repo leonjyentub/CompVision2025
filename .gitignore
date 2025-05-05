@@ -177,3 +177,5 @@ runs/
 pth/
 *.pth
 config.ini
+
+cropped_faces_*/

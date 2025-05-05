@@ -177,3 +177,6 @@ runs/
 pth/
 *.pth
 config.ini
+
+cropped_faces_*/
+checkpoints/

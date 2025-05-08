@@ -19,7 +19,7 @@ def create_config_file(config_path, root_dir):
 
 # Example usage:
 config_path = 'config.ini'
-root_dir = 'C:/Users/leonj/Documents/Data/open-images-bus-trucks'  # Replace with your actual dataset root directory
+root_dir = '/home/leonjye/Data'  # Replace with your actual dataset root directory
 create_config_file(config_path, root_dir)
 
 

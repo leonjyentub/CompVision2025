@@ -16,6 +16,10 @@ def Glob(x, extns=None):
         if isinstance(extns, str):
             extns = extns.split(",")
         files = [f for f in files if any([f.endswith(ext) for ext in extns])]
+    if len(files) == 0:
+        raise ValueError(f"no files found in {x}")
+    else:
+        print(f"found {len(files)} files in {x}")
     return files
 
 def fname(fpath):
@@ -47,8 +51,8 @@ def readImage2RGB(fpath):
     return img
 
 def readImage2CV2(fpath):
-    '''read an image from a file to RGB format'''
-    img = cv2.imread(str(fname), cv2.IMREAD_COLOR)
+    '''read an image from a file to cv2 format'''
+    img = cv2.imread(str(fname))
     return img
 
 import matplotlib.patheffects as path_effects

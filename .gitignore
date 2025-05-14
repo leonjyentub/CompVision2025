@@ -179,4 +179,5 @@ pth/
 config.ini
 
 cropped_faces_*/
+cropped_faces/
 checkpoints/

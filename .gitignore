@@ -182,3 +182,4 @@ cropped_faces_*/
 cropped_faces/
 checkpoints/
 .DS_Store
+kaggle.json

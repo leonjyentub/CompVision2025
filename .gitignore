@@ -181,5 +181,6 @@ config.ini
 cropped_faces_*/
 cropped_faces/
 checkpoints/
+checkpoint-*/
 .DS_Store
 kaggle.json

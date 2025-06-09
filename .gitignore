@@ -185,3 +185,4 @@ checkpoint-*/
 .DS_Store
 kaggle.json
 trocr-base-stage1-finetuned/
+*.pt

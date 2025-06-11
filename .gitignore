@@ -186,3 +186,4 @@ checkpoint-*/
 kaggle.json
 trocr-base-stage1-finetuned/
 clip_from_scratch.pt
+*.ckpt

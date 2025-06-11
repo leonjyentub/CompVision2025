@@ -5,5 +5,11 @@
         "plaintext": false,
         "markdown": false,
         "scminput": false
+    },
+    "editor.fontSize": 16,
+    "[python]": {
+        "editor.codeActionsOnSave": {
+            "source.organizeImports": "explicit"
+        }
     }
 }

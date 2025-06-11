@@ -1,7 +1,8 @@
 import torch
+from attention import SelfAttention
 from torch import nn
 from torch.nn import functional as F
-from attention import SelfAttention
+
 
 class CLIPEmbedding(nn.Module):
     def __init__(self, n_vocab: int, n_embd: int, n_token: int):
@@ -69,6 +70,7 @@ class CLIPLayer(nn.Module):
 class CLIP(nn.Module):
     def __init__(self):
         super().__init__()
+        #這裡只有77個token，因為CLIP的最大輸入長度是77，應該可以改的
         self.embedding = CLIPEmbedding(49408, 768, 77)
 
         self.layers = nn.ModuleList([
@@ -88,5 +90,4 @@ class CLIP(nn.Module):
             # (Batch_Size, Seq_Len, Dim) -> (Batch_Size, Seq_Len, Dim)
             state = layer(state)
         output = self.layernorm(state)
-        
         return output

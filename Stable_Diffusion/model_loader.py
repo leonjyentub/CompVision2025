@@ -1,11 +1,14 @@
+import model_converter
 from clip import CLIP
-from encoder import VAE_Encoder
 from decoder import VAE_Decoder
 from diffusion import Diffusion
+from encoder import VAE_Encoder
 
-import model_converter
 
 def preload_models_from_standard_weights(ckpt_path, device):
+    '''
+    想試試看把這四個models用pytorch vision的model重寫一遍
+    '''
     state_dict = model_converter.load_from_standard_weights(ckpt_path, device)
 
     encoder = VAE_Encoder().to(device)

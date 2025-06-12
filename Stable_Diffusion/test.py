@@ -21,14 +21,33 @@ tokenizer = CLIPTokenizer("vocab.json", merges_file="merges.txt")
 # 可以在這裡下載
 # https://huggingface.co/Envvi/Inkpunk-Diffusion/tree/main
 # https://huggingface.co/ogkalu/Comic-Diffusion/tree/main
-model_file = "inkpunk-diffusion-v1.ckpt"
+model_file = "Inkpunk-Diffusion-v2.ckpt"
 
 
 models = model_loader.preload_models_from_standard_weights(model_file, DEVICE)
 
+# %%
+'''這個model有
+'clip': clip,
+'encoder': encoder,
+'decoder': decoder,
+'diffusion': diffusion
+使用torchinfo來看這四個模型的結構
+
+from torchinfo import summary
+
+print("CLIP Model Summary:")
+summary(models['clip'], input_size=(1, 77), device=DEVICE)
+print("Encoder Summary:")
+summary(models['encoder'], input_size=(1, 3, 512, 512), device=DEVICE)
+print("Decoder Summary:")
+summary(models['decoder'], input_size=(1, 4, 64, 64), device=DEVICE)
+print("Diffusion Summary:")
+summary(models['diffusion'], input_size=(1, 4, 64, 64), device=DEVICE)
+'''
 
 # TEXT TO IMAGE
-prompt = '''cute Maltese dog, big sparkling eyes, fluffy white fur, sitting on grass, anime style, manga illustration, vibrant colors, clean lineart, highly detailed, soft shading, pastel background, adorable expression, masterpiece, best quality, ultra-detailed, 4k, sharp focus, bright lighting, full body'''
+prompt = '''cute Maltese dog, big sparkling eyes, fluffy white fur, sitting on grass, manga illustration, vibrant colors, clean lineart, highly detailed, soft shading, pastel background, adorable expression, masterpiece, best quality, ultra-detailed'''
 uncond_prompt = ""  # Optional: negative prompt
 do_cfg = True
 cfg_scale = 8  # min: 1, max: 14
